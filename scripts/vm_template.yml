@@ -1,0 +1,69 @@
+# SPDX-license-identifier: Apache-2.0
+##############################################################################
+# Copyright (c) 2024
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Apache License, Version 2.0
+# which accompanies this distribution, and is available at
+# http://www.apache.org/licenses/LICENSE-2.0
+##############################################################################
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: ubuntu-jammy-vm
+spec:
+  dataVolumeTemplates:
+    - metadata:
+        name: ubuntu-jammy-dv
+      spec:
+        storage:
+          volumeMode: Filesystem
+        source:
+          pvc:
+            name: ubuntu-img-jammy
+            namespace: default
+  runStrategy: Manual
+  template:
+    spec:
+      terminationGracePeriodSeconds: 30
+      domain:
+        devices:
+          filesystems:
+            - name: runner-info
+              virtiofs: {}
+          disks:
+            - name: os
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+        cpu:
+          cores: 4
+        resources:
+          requests:
+            memory: 16G
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - dataVolume:
+            name: ubuntu-jammy-dv
+          name: os
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |-
+              #cloud-config
+              mounts:
+                - [ runner-info, /runner-info/, virtiofs, "rw,relatime,user=runner" ]
+              runcmd:
+                - "sudo runuser -l runner -c '/opt/runner/run.sh --jitconfig $(jq -r '.jitconfig' /runner-info/runner-info.json)'"
+                - sleep 30
+              power_state:
+                delay: now
+                mode: poweroff
+                message: Runner completed
+                timeout: 2
+                condition: true

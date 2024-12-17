@@ -1,0 +1,48 @@
+# SPDX-license-identifier: Apache-2.0
+##############################################################################
+# Copyright (c) 2024
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Apache License, Version 2.0
+# which accompanies this distribution, and is available at
+# http://www.apache.org/licenses/LICENSE-2.0
+##############################################################################
+name: Lint Code Base
+# yamllint disable-line rule:truthy
+on:
+  push:
+  pull_request:
+jobs:
+  get-sloc:
+    name: Count Lines of Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # 4.2.2
+      - name: Setup Go
+        uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # 5.1.0
+        with:
+          go-version: ">=1.20.0"
+      - name: Install dependencies
+        run: go install github.com/boyter/scc/v3@latest
+      - name: Run scc tool
+        run: scc --format wide
+  check-broken-links:
+    name: Check documentation external links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # 4.2.2
+      - name: Check broken links
+        uses: gaurav-nelson/github-action-markdown-link-check@d53a906aa6b22b8979d33bc86170567e619495ec # 1.0.15
+  check-super-linter:
+    name: Check syntax (super-linter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # 4.2.2
+      - name: Run super-linter validation
+        uses: github/super-linter@b807e99ddd37e444d189cfd2c2ca1274d8ae8ef1 # 7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINTER_RULES_PATH: /
+          VALIDATE_CHECKOV: false
+          VALIDATE_GOOGLE_JAVA_FORMAT: false
+          VALIDATE_JAVA: false
+          VALIDATE_KUBERNETES_KUBECONFORM: false
