@@ -45,7 +45,7 @@ type Runner struct {
 	virtualMachineInstance string
 }
 
-func (rc Runner) getResources(ctx context.Context, vmTemplate, runnerName, jitConfig string) (
+func (rc *Runner) getResources(ctx context.Context, vmTemplate, runnerName, jitConfig string) (
 	*v1.VirtualMachineInstance, *v1beta1.DataVolume,
 ) {
 	virtualMachine, err := rc.virtClient.VirtualMachine(rc.namespace).Get(

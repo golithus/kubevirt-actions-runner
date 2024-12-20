@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewRootCommand(ctx context.Context, cmdOptions Opts) *cobra.Command {
+func NewRootCommand(ctx context.Context, runner *runner.Runner, opts Opts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kar",
 		Short: "Tool that creates a GitHub Self-Host runner with Kubevirt Virtual Machine Instance",
@@ -31,24 +31,20 @@ func NewRootCommand(ctx context.Context, cmdOptions Opts) *cobra.Command {
 			return initializeConfig(cmd)
 		},
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return run(ctx, cmdOptions)
+			return run(ctx, runner, opts)
 		},
 	}
 
-	installFlags(cmd.Flags(), &cmdOptions)
+	installFlags(cmd.Flags(), &opts)
 
 	return cmd
 }
 
-func run(ctx context.Context, c Opts) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+func run(ctx context.Context, runner *runner.Runner, opts Opts) error {
+	runner.CreateResources(ctx, opts.vmTemplate, opts.runnerName, opts.jsonConfig)
+	defer runner.DeleteResources(ctx)
 
-	runnerClient := runner.NewRunner()
-	runnerClient.CreateResources(ctx, c.vmTemplate, c.runnerName, c.jsonConfig)
-	defer runnerClient.DeleteResources(ctx)
-
-	runnerClient.WaitForVirtualMachineInstance(ctx)
+	runner.WaitForVirtualMachineInstance(ctx)
 
 	return nil
 }

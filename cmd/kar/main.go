@@ -21,26 +21,29 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"syscall"
 
 	"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app"
+	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/pkg/errors"
 )
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	var opts app.Opts
+
+	runner := runner.NewRunner()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	go func() {
-		<-signalChan
-		cancel()
+		<-ctx.Done()
+		runner.DeleteResources(ctx)
+		stop()
 	}()
 
-	var opts app.Opts
-	rootCmd := app.NewRootCommand(ctx, opts)
+	rootCmd := app.NewRootCommand(ctx, runner, opts)
 
 	if err := rootCmd.Execute(); err != nil && !errors.Is(errors.Cause(err), context.Canceled) {
-		log.Fatalln(err.Error())
+		log.Panicln(err.Error())
 	}
 }
