@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/pflag"
 	k8scorev1 "k8s.io/api/core/v1"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	v1 "kubevirt.io/api/core/v1"
 	cdiclient "kubevirt.io/client-go/containerizeddataimporter"
 	"kubevirt.io/client-go/kubecli"
@@ -77,9 +78,12 @@ func (rc *Runner) getResources(ctx context.Context, vmTemplate, runnerName, jitC
 	for _, dvt := range virtualMachine.Spec.DataVolumeTemplates {
 		for _, volume := range virtualMachineInstance.Spec.Volumes {
 			if volume.DataVolume != nil && volume.DataVolume.Name == dvt.Name {
-				dataVolume = &v1beta1.DataVolume{}
-				dataVolume.Name = fmt.Sprintf("%s-%s", dvt.Name, runnerName)
-				dataVolume.Spec = dvt.Spec
+				dataVolume = &v1beta1.DataVolume{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name: fmt.Sprintf("%s-%s", dvt.Name, runnerName),
+					},
+					Spec: dvt.Spec,
+				}
 
 				volume.DataVolume.Name = dataVolume.Name
 
@@ -88,7 +92,13 @@ func (rc *Runner) getResources(ctx context.Context, vmTemplate, runnerName, jitC
 		}
 	}
 
-	virtualMachineInstance.Spec.Volumes = append(virtualMachineInstance.Spec.Volumes, v1.Volume{
+	virtualMachineInstance.Spec.Volumes = append(virtualMachineInstance.Spec.Volumes, generateRunnerInfoVolume())
+
+	return virtualMachineInstance, dataVolume
+}
+
+func generateRunnerInfoVolume() v1.Volume {
+	return v1.Volume{
 		Name: runnerInfoVolume,
 		VolumeSource: v1.VolumeSource{
 			DownwardAPI: &v1.DownwardAPIVolumeSource{
@@ -102,9 +112,7 @@ func (rc *Runner) getResources(ctx context.Context, vmTemplate, runnerName, jitC
 				},
 			},
 		},
-	})
-
-	return virtualMachineInstance, dataVolume
+	}
 }
 
 func (rc *Runner) CreateResources(ctx context.Context,
@@ -112,23 +120,36 @@ func (rc *Runner) CreateResources(ctx context.Context,
 ) {
 	virtualMachineInstance, dataVolume := rc.getResources(ctx, vmTemplate, runnerName, jitConfig)
 
-	log.Printf("Creating %s Data Volume\n", dataVolume.Name)
-
-	if _, err := rc.cdiClient.CdiV1beta1().DataVolumes(
-		rc.namespace).Create(ctx, dataVolume, k8smetav1.CreateOptions{}); err != nil {
-		log.Fatalf("cannot create data volume: %v\n", err)
-	}
-
-	rc.dataVolume = dataVolume.Name
-
 	log.Printf("Creating %s Virtual Machine Instance\n", virtualMachineInstance.Name)
 
-	if _, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Create(ctx,
-		virtualMachineInstance, k8smetav1.CreateOptions{}); err != nil {
+	vmi, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Create(ctx,
+		virtualMachineInstance, k8smetav1.CreateOptions{})
+	if err != nil {
 		log.Fatal(err.Error())
 	}
 
 	rc.virtualMachineInstance = virtualMachineInstance.Name
+
+	if dataVolume != nil {
+		log.Printf("Creating %s Data Volume\n", dataVolume.Name)
+
+		dataVolume.OwnerReferences = []k8smetav1.OwnerReference{
+			{
+				APIVersion: "kubevirt.io/v1",
+				Kind:       "VirtualMachineInstance",
+				Name:       vmi.Name,
+				UID:        vmi.UID,
+				Controller: ptr.To(false),
+			},
+		}
+
+		if _, err := rc.cdiClient.CdiV1beta1().DataVolumes(
+			rc.namespace).Create(ctx, dataVolume, k8smetav1.CreateOptions{}); err != nil {
+			log.Fatalf("cannot create data volume: %v\n", err)
+		}
+
+		rc.dataVolume = dataVolume.Name
+	}
 }
 
 func (rc *Runner) WaitForVirtualMachineInstance(ctx context.Context) {
