@@ -14,6 +14,14 @@ if [[ ${DEBUG:-false} == "true" ]]; then
 	set -o xtrace
 fi
 
+if ! command -v go >/dev/null; then
+	curl -fsSL http://bit.ly/install_pkg | PKG=go-lang bash
+	# shellcheck disable=SC1091
+	source /etc/profile.d/path.sh
+fi
+
+go mod tidy -go="$(curl -sL https://golang.org/VERSION?m=text | sed -n 's/go//;s/\..$//;1p')"
+
 # Update GitHub Action commit hashes
 gh_actions=$(grep -r "uses: [a-zA-Z\-]*/[\_a-z\-]*@" .github/ | sed 's/@.*//' | awk -F ': ' '{ print $3 }' | sort -u)
 for action in $gh_actions; do
