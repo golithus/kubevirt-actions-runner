@@ -45,6 +45,7 @@ type Runner struct {
 	namespace              string
 	dataVolume             string
 	virtualMachineInstance string
+	CurrentStatus          v1.VirtualMachineInstancePhase
 }
 
 func (rc *Runner) getResources(ctx context.Context, vmTemplate, runnerName, jitConfig string) (
@@ -162,23 +163,26 @@ func (rc *Runner) WaitForVirtualMachineInstance(ctx context.Context) {
 	}
 	defer watch.Stop()
 
-	lastPhase := ""
 	lastTimeChecked := time.Now()
 
 	for event := range watch.ResultChan() {
 		vmi, ok := event.Object.(*v1.VirtualMachineInstance)
 		if ok && vmi.Name == rc.virtualMachineInstance {
-			if vmi.Status.Phase != v1.VirtualMachineInstancePhase(lastPhase) {
-				lastPhase = string(vmi.Status.Phase)
-				log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, lastPhase)
+			if vmi.Status.Phase != rc.CurrentStatus {
+				rc.CurrentStatus = vmi.Status.Phase
+				log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, rc.CurrentStatus)
 				lastTimeChecked = time.Now()
 
-				switch lastPhase {
-				case "Succeeded", "Failed":
+				switch rc.CurrentStatus {
+				case v1.Succeeded:
+					log.Printf("%s has successfuly completed\n", rc.virtualMachineInstance)
+					return
+				case v1.Failed:
+					log.Printf("%s has failed\n", rc.virtualMachineInstance)
 					return
 				}
 			} else if time.Since(lastTimeChecked).Minutes() > 5.0 {
-				log.Printf("%s is in %s phase \n", rc.virtualMachineInstance, lastPhase)
+				log.Printf("%s is in %s phase \n", rc.virtualMachineInstance, rc.CurrentStatus)
 				lastTimeChecked = time.Now()
 			}
 		}

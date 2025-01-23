@@ -18,9 +18,11 @@ package app
 
 import (
 	"context"
+	"errors"
 
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/spf13/cobra"
+	kubevirt_v1 "kubevirt.io/api/core/v1"
 )
 
 func NewRootCommand(ctx context.Context, runner *runner.Runner, opts Opts) *cobra.Command {
@@ -45,6 +47,10 @@ func run(ctx context.Context, runner *runner.Runner, opts Opts) error {
 	defer runner.DeleteResources(ctx)
 
 	runner.WaitForVirtualMachineInstance(ctx)
+
+	if runner.CurrentStatus == kubevirt_v1.Failed {
+		return errors.New("virtual machine instance has failed")
+	}
 
 	return nil
 }
