@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/spf13/pflag"
 	k8scorev1 "k8s.io/api/core/v1"
@@ -162,16 +163,23 @@ func (rc *Runner) WaitForVirtualMachineInstance(ctx context.Context) {
 	defer watch.Stop()
 
 	lastPhase := ""
+	lastTimeChecked := time.Now()
 
 	for event := range watch.ResultChan() {
 		vmi, ok := event.Object.(*v1.VirtualMachineInstance)
-		if ok && vmi.Name == rc.virtualMachineInstance && vmi.Status.Phase != v1.VirtualMachineInstancePhase(lastPhase) {
-			lastPhase = string(vmi.Status.Phase)
-			log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, lastPhase)
+		if ok && vmi.Name == rc.virtualMachineInstance {
+			if vmi.Status.Phase != v1.VirtualMachineInstancePhase(lastPhase) {
+				lastPhase = string(vmi.Status.Phase)
+				log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, lastPhase)
+				lastTimeChecked = time.Now()
 
-			switch lastPhase {
-			case "Succeeded", "Failed":
-				return
+				switch lastPhase {
+				case "Succeeded", "Failed":
+					return
+				}
+			} else if time.Since(lastTimeChecked).Minutes() > 5.0 {
+				log.Printf("%s is in %s phase \n", rc.virtualMachineInstance, lastPhase)
+				lastTimeChecked = time.Now()
 			}
 		}
 	}
