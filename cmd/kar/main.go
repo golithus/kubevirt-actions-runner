@@ -21,14 +21,44 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 
 	"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app"
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/pkg/errors"
 )
 
+type buildInfo struct {
+	gitCommit       string
+	gitTreeModified string
+	buildDate       string
+	goVersion       string
+}
+
+func getBuildInfo() buildInfo {
+	b := buildInfo{}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		b.goVersion = info.GoVersion
+		for _, kv := range info.Settings {
+			switch kv.Key {
+			case "vcs.revision":
+				b.gitCommit = kv.Value
+			case "vcs.time":
+				b.buildDate = kv.Value
+			case "vcs.modified":
+				b.gitTreeModified = kv.Value
+			}
+		}
+	}
+
+	return b
+}
+
 func main() {
 	var opts app.Opts
+
+	b := getBuildInfo()
+	log.Printf("starting kubevirt action runner\ncommit: %v\tmodified:%v\n", b.gitCommit, b.gitTreeModified)
 
 	runner := runner.NewRunner()
 
