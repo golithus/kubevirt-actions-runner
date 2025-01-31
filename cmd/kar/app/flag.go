@@ -31,11 +31,11 @@ func installFlags(flags *pflag.FlagSet, cmdOptions *Opts) {
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	v.AutomaticEnv()
 
-	flags.StringVarP(&cmdOptions.vmTemplate, "kubevirt-vm-template", "t", "vm-template",
+	flags.StringVarP(&cmdOptions.VmTemplate, "kubevirt-vm-template", "t", "vm-template",
 		"The VirtualMachine resource to use as the template.")
-	flags.StringVarP(&cmdOptions.runnerName, "runner-name", "r", "runner",
+	flags.StringVarP(&cmdOptions.RunnerName, "runner-name", "r", "runner",
 		"The name of the runner.")
-	flags.StringVarP(&cmdOptions.jsonConfig, "actions-runner-input-jitconfig", "c", "",
+	flags.StringVarP(&cmdOptions.JitConfig, "actions-runner-input-jitconfig", "c", "",
 		"The opaque JIT runner config.")
 }
 

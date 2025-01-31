@@ -22,10 +22,9 @@ import (
 
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/spf13/cobra"
-	kubevirt_v1 "kubevirt.io/api/core/v1"
 )
 
-func NewRootCommand(ctx context.Context, runner *runner.Runner, opts Opts) *cobra.Command {
+func NewRootCommand(ctx context.Context, runner runner.Runner, opts Opts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kar",
 		Short: "Tool that creates a GitHub Self-Host runner with Kubevirt Virtual Machine Instance",
@@ -42,13 +41,13 @@ func NewRootCommand(ctx context.Context, runner *runner.Runner, opts Opts) *cobr
 	return cmd
 }
 
-func run(ctx context.Context, runner *runner.Runner, opts Opts) error {
-	runner.CreateResources(ctx, opts.vmTemplate, opts.runnerName, opts.jsonConfig)
+func run(ctx context.Context, runner runner.Runner, opts Opts) error {
+	runner.CreateResources(ctx, opts.VmTemplate, opts.RunnerName, opts.JitConfig)
 	defer runner.DeleteResources(ctx)
 
 	runner.WaitForVirtualMachineInstance(ctx)
 
-	if runner.CurrentStatus == kubevirt_v1.Failed {
+	if runner.Failed() {
 		return errors.New("virtual machine instance has failed")
 	}
 
