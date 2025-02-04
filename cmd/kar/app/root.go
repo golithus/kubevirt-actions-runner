@@ -18,9 +18,9 @@ package app
 
 import (
 	"context"
-	"errors"
 
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +42,10 @@ func NewRootCommand(ctx context.Context, runner runner.Runner, opts Opts) *cobra
 }
 
 func run(ctx context.Context, runner runner.Runner, opts Opts) error {
-	runner.CreateResources(ctx, opts.VmTemplate, opts.RunnerName, opts.JitConfig)
+	err := runner.CreateResources(ctx, opts.VMTemplate, opts.RunnerName, opts.JitConfig)
+	if err != nil {
+		return errors.Wrap(err, "fail to create resources")
+	}
 	defer runner.DeleteResources(ctx)
 
 	runner.WaitForVirtualMachineInstance(ctx)

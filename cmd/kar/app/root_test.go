@@ -19,11 +19,12 @@ package app_test
 import (
 	"context"
 
+	"slices"
+
 	"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
-	"slices"
 )
 
 type mock struct {
@@ -40,20 +41,26 @@ func (m *mock) Failed() bool {
 	return m.failed
 }
 
-func (m *mock) CreateResources(ctx context.Context, vmTemplate, runnerName, jitConfig string,
-) {
+func (m *mock) GetVMIName() string {
+	return m.runnerName
+}
+
+func (m *mock) CreateResources(_ context.Context, vmTemplate, runnerName, jitConfig string,
+) error {
 	m.vmTemplate = vmTemplate
 	m.runnerName = runnerName
 	m.jitConfig = jitConfig
 
 	m.createCalled = true
+
+	return nil
 }
 
-func (m *mock) WaitForVirtualMachineInstance(ctx context.Context) {
+func (m *mock) WaitForVirtualMachineInstance(_ context.Context) {
 	m.waitCalled = true
 }
 
-func (m *mock) DeleteResources(ctx context.Context) {
+func (m *mock) DeleteResources(_ context.Context) {
 	m.deleteCalled = true
 }
 

@@ -26,6 +26,8 @@ import (
 	"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app"
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/pkg/errors"
+	"github.com/spf13/pflag"
+	"kubevirt.io/client-go/kubecli"
 )
 
 type buildInfo struct {
@@ -36,31 +38,49 @@ type buildInfo struct {
 }
 
 func getBuildInfo() buildInfo {
-	b := buildInfo{}
+	out := buildInfo{}
+
 	if info, ok := debug.ReadBuildInfo(); ok {
-		b.goVersion = info.GoVersion
-		for _, kv := range info.Settings {
-			switch kv.Key {
+		out.goVersion = info.GoVersion
+
+		for _, setting := range info.Settings {
+			switch setting.Key {
 			case "vcs.revision":
-				b.gitCommit = kv.Value
+				out.gitCommit = setting.Value
 			case "vcs.time":
-				b.buildDate = kv.Value
+				out.buildDate = setting.Value
 			case "vcs.modified":
-				b.gitTreeModified = kv.Value
+				out.gitTreeModified = setting.Value
 			}
 		}
 	}
 
-	return b
+	return out
 }
 
 func main() {
-	var opts app.Opts
+	var (
+		opts app.Opts
+		err  error
+	)
 
-	b := getBuildInfo()
-	log.Printf("starting kubevirt action runner\ncommit: %v\tmodified:%v\n", b.gitCommit, b.gitTreeModified)
+	buildInfo := getBuildInfo()
+	log.Printf("starting kubevirt action runner\ncommit: %v\tmodified:%v\n",
+		buildInfo.gitCommit, buildInfo.gitTreeModified)
 
-	runner := runner.NewRunner()
+	clientConfig := kubecli.DefaultClientConfig(&pflag.FlagSet{})
+
+	namespace, _, err := clientConfig.Namespace()
+	if err != nil {
+		log.Fatalf("error in namespace : %v\n", err)
+	}
+
+	virtClient, err := kubecli.GetKubevirtClientFromClientConfig(clientConfig)
+	if err != nil {
+		log.Fatalf("cannot obtain KubeVirt client: %v\n", err)
+	}
+
+	runner := runner.NewRunner(namespace, virtClient)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

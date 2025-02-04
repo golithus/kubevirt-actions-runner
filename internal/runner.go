@@ -23,7 +23,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/spf13/pflag"
+	"github.com/pkg/errors"
 	k8scorev1 "k8s.io/api/core/v1"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -40,10 +40,11 @@ const (
 )
 
 type Runner interface {
-	CreateResources(context.Context, string, string, string)
-	WaitForVirtualMachineInstance(context.Context)
-	DeleteResources(context.Context)
+	CreateResources(ctx context.Context, vmTemplate string, runnerName string, jitConfig string) error
+	WaitForVirtualMachineInstance(ctx context.Context)
+	DeleteResources(ctx context.Context)
 	Failed() bool
+	GetVMIName() string
 }
 
 type KubevirtRunner struct {
@@ -61,13 +62,17 @@ func (rc *KubevirtRunner) Failed() bool {
 	return rc.currentStatus == v1.Failed
 }
 
+func (rc *KubevirtRunner) GetVMIName() string {
+	return rc.virtualMachineInstance
+}
+
 func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerName, jitConfig string) (
-	*v1.VirtualMachineInstance, *v1beta1.DataVolume,
+	*v1.VirtualMachineInstance, *v1beta1.DataVolume, error,
 ) {
 	virtualMachine, err := rc.virtClient.VirtualMachine(rc.namespace).Get(
 		ctx, vmTemplate, k8smetav1.GetOptions{})
 	if err != nil {
-		log.Fatalf("cannot obtain KubeVirt vm list: %v\n", err)
+		return nil, nil, errors.Wrap(err, "cannot obtain KubeVirt vm list")
 	}
 
 	virtualMachineInstance := v1.NewVMIReferenceFromNameWithNS(rc.namespace, runnerName)
@@ -83,7 +88,7 @@ func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerNa
 
 	out, err := json.Marshal(jri)
 	if err != nil {
-		log.Fatalf("cannot marshal jitConfig: %v\n", err)
+		return nil, nil, errors.Wrap(err, "cannot marshal jitConfig")
 	}
 
 	virtualMachineInstance.Annotations[runnerInfoAnnotation] = string(out)
@@ -109,7 +114,7 @@ func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerNa
 
 	virtualMachineInstance.Spec.Volumes = append(virtualMachineInstance.Spec.Volumes, generateRunnerInfoVolume())
 
-	return virtualMachineInstance, dataVolume
+	return virtualMachineInstance, dataVolume, nil
 }
 
 func generateRunnerInfoVolume() v1.Volume {
@@ -132,15 +137,30 @@ func generateRunnerInfoVolume() v1.Volume {
 
 func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 	vmTemplate, runnerName, jitConfig string,
-) {
-	virtualMachineInstance, dataVolume := rc.getResources(ctx, vmTemplate, runnerName, jitConfig)
+) error {
+	if len(vmTemplate) == 0 {
+		return ErrEmptyVMTemplate
+	}
+
+	if len(runnerName) == 0 {
+		return ErrEmptyRunnerName
+	}
+
+	if len(jitConfig) == 0 {
+		return ErrEmptyJitConfig
+	}
+
+	virtualMachineInstance, dataVolume, err := rc.getResources(ctx, vmTemplate, runnerName, jitConfig)
+	if err != nil {
+		return err
+	}
 
 	log.Printf("Creating %s Virtual Machine Instance\n", virtualMachineInstance.Name)
 
 	vmi, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Create(ctx,
 		virtualMachineInstance, k8smetav1.CreateOptions{})
 	if err != nil {
-		log.Fatal(err.Error())
+		return errors.Wrap(err, "fail to create runner instance")
 	}
 
 	rc.virtualMachineInstance = virtualMachineInstance.Name
@@ -160,15 +180,19 @@ func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 
 		if _, err := rc.cdiClient.CdiV1beta1().DataVolumes(
 			rc.namespace).Create(ctx, dataVolume, k8smetav1.CreateOptions{}); err != nil {
-			log.Fatalf("cannot create data volume: %v\n", err)
+			return errors.Wrap(err, "cannot create data volume")
 		}
 
 		rc.dataVolume = dataVolume.Name
 	}
+
+	return nil
 }
 
 func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context) {
 	log.Printf("Watching %s Virtual Machine Instance\n", rc.virtualMachineInstance)
+
+	const reportingElapse = 5.0
 
 	watch, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Watch(ctx, k8smetav1.ListOptions{})
 	if err != nil {
@@ -183,19 +207,23 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context) {
 		if ok && vmi.Name == rc.virtualMachineInstance {
 			if vmi.Status.Phase != rc.currentStatus {
 				rc.currentStatus = vmi.Status.Phase
-				log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, rc.currentStatus)
 				lastTimeChecked = time.Now()
 
 				switch rc.currentStatus {
 				case v1.Succeeded:
-					log.Printf("%s has successfuly completed\n", rc.virtualMachineInstance)
+					log.Printf("%s has successfully completed\n", rc.virtualMachineInstance)
+
 					return
 				case v1.Failed:
 					log.Printf("%s has failed\n", rc.virtualMachineInstance)
+
 					return
+				default:
+					log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, rc.currentStatus)
 				}
-			} else if time.Since(lastTimeChecked).Minutes() > 5.0 {
+			} else if time.Since(lastTimeChecked).Minutes() > reportingElapse {
 				log.Printf("%s is in %s phase \n", rc.virtualMachineInstance, rc.currentStatus)
+
 				lastTimeChecked = time.Now()
 			}
 		}
@@ -219,21 +247,7 @@ func (rc *KubevirtRunner) DeleteResources(ctx context.Context) {
 	}
 }
 
-func NewRunner() *KubevirtRunner {
-	var err error
-
-	clientConfig := kubecli.DefaultClientConfig(&pflag.FlagSet{})
-
-	namespace, _, err := clientConfig.Namespace()
-	if err != nil {
-		log.Fatalf("error in namespace : %v\n", err)
-	}
-
-	virtClient, err := kubecli.GetKubevirtClientFromClientConfig(clientConfig)
-	if err != nil {
-		log.Fatalf("cannot obtain KubeVirt client: %v\n", err)
-	}
-
+func NewRunner(namespace string, virtClient kubecli.KubevirtClient) *KubevirtRunner {
 	return &KubevirtRunner{
 		namespace:  namespace,
 		virtClient: virtClient,
