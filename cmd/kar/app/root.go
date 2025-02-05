@@ -46,7 +46,7 @@ func run(ctx context.Context, runner runner.Runner, opts Opts) error {
 	if err != nil {
 		return errors.Wrap(err, "fail to create resources")
 	}
-	defer runner.DeleteResources(ctx)
+	defer runner.DeleteResources(ctx, runner.GetDataVolumeName(), runner.GetDataVolumeName())
 
 	runner.WaitForVirtualMachineInstance(ctx)
 

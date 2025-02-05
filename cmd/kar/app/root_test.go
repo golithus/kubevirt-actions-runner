@@ -45,6 +45,10 @@ func (m *mock) GetVMIName() string {
 	return m.runnerName
 }
 
+func (m *mock) GetDataVolumeName() string {
+	return m.runnerName
+}
+
 func (m *mock) CreateResources(_ context.Context, vmTemplate, runnerName, jitConfig string,
 ) error {
 	m.vmTemplate = vmTemplate
@@ -60,8 +64,10 @@ func (m *mock) WaitForVirtualMachineInstance(_ context.Context) {
 	m.waitCalled = true
 }
 
-func (m *mock) DeleteResources(_ context.Context) {
+func (m *mock) DeleteResources(_ context.Context, _, _ string) error {
 	m.deleteCalled = true
+
+	return nil
 }
 
 var _ = Describe("Root Command", func() {

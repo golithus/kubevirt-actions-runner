@@ -87,7 +87,7 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
-		runner.DeleteResources(ctx)
+		runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName())
 		stop()
 	}()
 

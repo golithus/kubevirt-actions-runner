@@ -29,6 +29,7 @@ import (
 	cdifake "kubevirt.io/client-go/containerizeddataimporter/fake"
 	"kubevirt.io/client-go/kubecli"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
+	"kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 )
 
 var _ = Describe("Runner", func() {
@@ -36,9 +37,16 @@ var _ = Describe("Runner", func() {
 	var virtClientset *kubevirtfake.Clientset
 	var karRunner runner.Runner
 
+	const (
+		vmTemplate = "vm-template"
+		vmInstance = "runner-xyz123"
+		dataVolume = "dv-xyz123"
+	)
+
 	BeforeEach(func() {
-		cdiClientset := cdifake.NewSimpleClientset()
 		virtClient = kubecli.NewMockKubevirtClient(gomock.NewController(GinkgoT()))
+		virtClientset = kubevirtfake.NewSimpleClientset(NewVirtualMachineInstance(vmInstance), NewVirtualMachine(vmTemplate))
+		cdiClientset := cdifake.NewSimpleClientset(NewDataVolume(dataVolume))
 
 		virtClient.EXPECT().CdiClient().Return(cdiClientset).AnyTimes()
 
@@ -46,9 +54,6 @@ var _ = Describe("Runner", func() {
 	})
 
 	DescribeTable("create resources", func(shouldSucceed bool, vmTemplate, runnerName, jitConfig string) {
-		vm := NewVirtualMachine(vmTemplate)
-		virtClientset = kubevirtfake.NewSimpleClientset(vm)
-
 		if shouldSucceed {
 			virtClient.EXPECT().VirtualMachine(k8sv1.NamespaceDefault).Return(
 				virtClientset.KubevirtV1().VirtualMachines(k8sv1.NamespaceDefault),
@@ -76,20 +81,60 @@ var _ = Describe("Runner", func() {
 			}
 		}
 	},
-		Entry("when the valid information is provided", true, "vmTemplate", "runnerName", "jitConfig"),
+		Entry("when the valid information is provided", true, vmTemplate, "runnerName", "jitConfig"),
 		Entry("when empty vm template is provided", false, "", "runnerName", "jitConfig"),
-		Entry("when empty runner name is provided", false, "vmTemplate", "", "jitConfig"),
-		Entry("when empty jit config is provided", false, "vmTemplate", "runnerName", ""),
+		Entry("when empty runner name is provided", false, vmTemplate, "", "jitConfig"),
+		Entry("when empty jit config is provided", false, vmTemplate, "runnerName", ""),
+	)
+
+	DescribeTable("delete resources", func(shouldSucceed bool, vmInstance, dataVolume string) {
+		virtClient.EXPECT().VirtualMachineInstance(k8sv1.NamespaceDefault).Return(
+			virtClientset.KubevirtV1().VirtualMachineInstances(k8sv1.NamespaceDefault),
+		)
+
+		err := karRunner.DeleteResources(context.TODO(), vmInstance, dataVolume)
+
+		if shouldSucceed {
+			Expect(err).NotTo(HaveOccurred())
+		} else {
+			Expect(err).To(HaveOccurred())
+		}
+	},
+		Entry("when the runner has a data volume", true, vmInstance, dataVolume),
+		Entry("when the runner doesn't have data volumes", true, vmInstance, ""),
+		Entry("when the runner doesn't exist", false, "runner-abc098", ""),
+		Entry("when the data volume doesn't exist", false, vmInstance, "dv-abc098"),
 	)
 })
 
 func NewVirtualMachine(name string) *v1.VirtualMachine {
 	return &v1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k8sv1.NamespaceDefault, ResourceVersion: "1", UID: "vm-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k8sv1.NamespaceDefault,
+		},
 		Spec: v1.VirtualMachineSpec{
 			Template: &v1.VirtualMachineInstanceTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{},
 			},
+		},
+	}
+}
+
+func NewVirtualMachineInstance(name string) *v1.VirtualMachineInstance {
+	return &v1.VirtualMachineInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k8sv1.NamespaceDefault,
+		},
+	}
+}
+
+func NewDataVolume(name string) *v1beta1.DataVolume {
+	return &v1beta1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k8sv1.NamespaceDefault,
 		},
 	}
 }

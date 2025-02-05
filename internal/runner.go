@@ -28,7 +28,6 @@ import (
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	v1 "kubevirt.io/api/core/v1"
-	cdiclient "kubevirt.io/client-go/containerizeddataimporter"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 )
@@ -42,14 +41,14 @@ const (
 type Runner interface {
 	CreateResources(ctx context.Context, vmTemplate string, runnerName string, jitConfig string) error
 	WaitForVirtualMachineInstance(ctx context.Context)
-	DeleteResources(ctx context.Context)
+	DeleteResources(ctx context.Context, vmi string, dv string) error
 	Failed() bool
 	GetVMIName() string
+	GetDataVolumeName() string
 }
 
 type KubevirtRunner struct {
 	virtClient             kubecli.KubevirtClient
-	cdiClient              cdiclient.Interface
 	namespace              string
 	dataVolume             string
 	virtualMachineInstance string
@@ -64,6 +63,10 @@ func (rc *KubevirtRunner) Failed() bool {
 
 func (rc *KubevirtRunner) GetVMIName() string {
 	return rc.virtualMachineInstance
+}
+
+func (rc *KubevirtRunner) GetDataVolumeName() string {
+	return rc.dataVolume
 }
 
 func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerName, jitConfig string) (
@@ -178,7 +181,7 @@ func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 			},
 		}
 
-		if _, err := rc.cdiClient.CdiV1beta1().DataVolumes(
+		if _, err := rc.virtClient.CdiClient().CdiV1beta1().DataVolumes(
 			rc.namespace).Create(ctx, dataVolume, k8smetav1.CreateOptions{}); err != nil {
 			return errors.Wrap(err, "cannot create data volume")
 		}
@@ -230,27 +233,28 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context) {
 	}
 }
 
-func (rc *KubevirtRunner) DeleteResources(ctx context.Context) {
+func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineInstance, dataVolume string) error {
 	log.Printf("Cleaning %s Virtual Machine Instance resources\n",
-		rc.virtualMachineInstance)
+		virtualMachineInstance)
 
 	if err := rc.virtClient.VirtualMachineInstance(rc.namespace).Delete(
-		ctx, rc.virtualMachineInstance, k8smetav1.DeleteOptions{}); err != nil {
-		log.Fatal(err.Error())
+		ctx, virtualMachineInstance, k8smetav1.DeleteOptions{}); err != nil {
+		return errors.Wrap(err, "fail to delete runner instance")
 	}
 
-	if len(rc.dataVolume) > 0 {
-		if err := rc.cdiClient.CdiV1beta1().DataVolumes(rc.namespace).Delete(ctx, rc.dataVolume,
+	if len(dataVolume) > 0 {
+		if err := rc.virtClient.CdiClient().CdiV1beta1().DataVolumes(rc.namespace).Delete(ctx, dataVolume,
 			k8smetav1.DeleteOptions{}); err != nil {
-			log.Fatal(err.Error())
+			return errors.Wrap(err, "fail to delete runner data volume")
 		}
 	}
+
+	return nil
 }
 
 func NewRunner(namespace string, virtClient kubecli.KubevirtClient) *KubevirtRunner {
 	return &KubevirtRunner{
 		namespace:  namespace,
 		virtClient: virtClient,
-		cdiClient:  virtClient.CdiClient(),
 	}
 }
