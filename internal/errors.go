@@ -26,3 +26,6 @@ var ErrEmptyRunnerName = errors.New("empty runner name")
 
 // ErrEmptyJitConfig indicates that Just-in-Time configuration provided is empty.
 var ErrEmptyJitConfig = errors.New("empty jit config")
+
+// ErrRunnerFailed indicates that the runner has a failed during its execution.
+var ErrRunnerFailed = errors.New("runner has failed")

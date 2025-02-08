@@ -40,9 +40,8 @@ const (
 
 type Runner interface {
 	CreateResources(ctx context.Context, vmTemplate string, runnerName string, jitConfig string) error
-	WaitForVirtualMachineInstance(ctx context.Context)
+	WaitForVirtualMachineInstance(ctx context.Context, vmi string) error
 	DeleteResources(ctx context.Context, vmi string, dv string) error
-	Failed() bool
 	GetVMIName() string
 	GetDataVolumeName() string
 }
@@ -56,10 +55,6 @@ type KubevirtRunner struct {
 }
 
 var _ Runner = (*KubevirtRunner)(nil)
-
-func (rc *KubevirtRunner) Failed() bool {
-	return rc.currentStatus == v1.Failed
-}
 
 func (rc *KubevirtRunner) GetVMIName() string {
 	return rc.virtualMachineInstance
@@ -192,14 +187,14 @@ func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 	return nil
 }
 
-func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context) {
-	log.Printf("Watching %s Virtual Machine Instance\n", rc.virtualMachineInstance)
+func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, virtualMachineInstance string) error {
+	log.Printf("Watching %s Virtual Machine Instance\n", virtualMachineInstance)
 
 	const reportingElapse = 5.0
 
 	watch, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Watch(ctx, k8smetav1.ListOptions{})
 	if err != nil {
-		log.Fatalf("Failed to watch Virtual Machine Instance: %v", err)
+		return errors.Wrap(err, "failed to watch the virtual machine instance")
 	}
 	defer watch.Stop()
 
@@ -214,23 +209,25 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context) {
 
 				switch rc.currentStatus {
 				case v1.Succeeded:
-					log.Printf("%s has successfully completed\n", rc.virtualMachineInstance)
+					log.Printf("%s has successfully completed\n", virtualMachineInstance)
 
-					return
+					return nil
 				case v1.Failed:
-					log.Printf("%s has failed\n", rc.virtualMachineInstance)
+					log.Printf("%s has failed\n", virtualMachineInstance)
 
-					return
+					return ErrRunnerFailed
 				default:
-					log.Printf("%s has transitioned to %s phase \n", rc.virtualMachineInstance, rc.currentStatus)
+					log.Printf("%s has transitioned to %s phase \n", virtualMachineInstance, rc.currentStatus)
 				}
 			} else if time.Since(lastTimeChecked).Minutes() > reportingElapse {
-				log.Printf("%s is in %s phase \n", rc.virtualMachineInstance, rc.currentStatus)
+				log.Printf("%s is in %s phase \n", virtualMachineInstance, rc.currentStatus)
 
 				lastTimeChecked = time.Now()
 			}
 		}
 	}
+
+	return nil
 }
 
 func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineInstance, dataVolume string) error {

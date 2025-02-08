@@ -18,6 +18,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 
 	"slices"
 
@@ -28,7 +29,9 @@ import (
 )
 
 type mock struct {
-	failed       bool
+	createErr    error
+	deleteErr    error
+	waitErr      error
 	createCalled bool
 	waitCalled   bool
 	deleteCalled bool
@@ -37,8 +40,17 @@ type mock struct {
 	jitConfig    string
 }
 
-func (m *mock) Failed() bool {
-	return m.failed
+type Failure uint8
+
+const (
+	None Failure = 1 << iota
+	Create
+	Delete
+	Wait
+)
+
+func HasOneOf(f, flag Failure) bool {
+	return f&flag != 0
 }
 
 func (m *mock) GetVMIName() string {
@@ -57,17 +69,19 @@ func (m *mock) CreateResources(_ context.Context, vmTemplate, runnerName, jitCon
 
 	m.createCalled = true
 
-	return nil
+	return m.createErr
 }
 
-func (m *mock) WaitForVirtualMachineInstance(_ context.Context) {
+func (m *mock) WaitForVirtualMachineInstance(_ context.Context, _ string) error {
 	m.waitCalled = true
+
+	return m.waitErr
 }
 
 func (m *mock) DeleteResources(_ context.Context, _, _ string) error {
 	m.deleteCalled = true
 
-	return nil
+	return m.deleteErr
 }
 
 var _ = Describe("Root Command", func() {
@@ -80,9 +94,18 @@ var _ = Describe("Root Command", func() {
 		cmd = app.NewRootCommand(context.TODO(), &runner, opts)
 	})
 
-	DescribeTable("initialization process", func(shouldSucceed, failed bool, args ...string) {
+	DescribeTable("initialization process", func(shouldSucceed bool, failure Failure, args ...string) {
 		cmd.SetArgs(args)
-		runner.failed = failed
+		if HasOneOf(failure, Create) {
+			runner.createErr = errors.New("create failure")
+		}
+		if HasOneOf(failure, Delete) {
+			runner.deleteErr = errors.New("delete failure")
+		}
+		if HasOneOf(failure, Wait) {
+			runner.waitErr = errors.New("wait failure")
+		}
+
 		err := cmd.Execute()
 
 		if shouldSucceed {
@@ -102,13 +125,21 @@ var _ = Describe("Root Command", func() {
 		}
 
 		Expect(runner.createCalled).Should(BeTrue())
-		Expect(runner.deleteCalled).Should(BeTrue())
+		if HasOneOf(failure, Create) {
+			return
+		}
 		Expect(runner.waitCalled).Should(BeTrue())
+		if HasOneOf(failure, Wait) {
+			return
+		}
+		Expect(runner.deleteCalled).Should(BeTrue())
 	},
-		Entry("when the default options are provided", true, false),
-		Entry("when config option is provided", true, false, "-c", "test config"),
-		Entry("when vm template option is provided", true, false, "-t", "vm template"),
-		Entry("when runner name option is provided", true, false, "-r", "runner name"),
-		Entry("when the execution failed", false, true),
+		Entry("when the default options are provided", true, None),
+		Entry("when config option is provided", true, None, "-c", "test config"),
+		Entry("when vm template option is provided", true, None, "-t", "vm template"),
+		Entry("when runner name option is provided", true, None, "-r", "runner name"),
+		Entry("when the creation failed", false, Create),
+		Entry("when the delete failed", false, Delete),
+		Entry("when the wait failed", false, Wait),
 	)
 })

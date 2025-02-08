@@ -42,16 +42,15 @@ func NewRootCommand(ctx context.Context, runner runner.Runner, opts Opts) *cobra
 }
 
 func run(ctx context.Context, runner runner.Runner, opts Opts) error {
-	err := runner.CreateResources(ctx, opts.VMTemplate, opts.RunnerName, opts.JitConfig)
-	if err != nil {
+	if err := runner.CreateResources(ctx, opts.VMTemplate, opts.RunnerName, opts.JitConfig); err != nil {
 		return errors.Wrap(err, "fail to create resources")
 	}
-	defer runner.DeleteResources(ctx, runner.GetDataVolumeName(), runner.GetDataVolumeName())
+	if err := runner.WaitForVirtualMachineInstance(ctx, runner.GetVMIName()); err != nil {
+		return errors.Wrap(err, "fail to wait for resources")
+	}
 
-	runner.WaitForVirtualMachineInstance(ctx)
-
-	if runner.Failed() {
-		return errors.New("virtual machine instance has failed")
+	if err := runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName()); err != nil {
+		return errors.Wrap(err, "fail to delete resources")
 	}
 
 	return nil
