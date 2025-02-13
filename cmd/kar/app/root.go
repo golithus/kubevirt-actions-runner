@@ -45,6 +45,7 @@ func run(ctx context.Context, runner runner.Runner, opts Opts) error {
 	if err := runner.CreateResources(ctx, opts.VMTemplate, opts.RunnerName, opts.JitConfig); err != nil {
 		return errors.Wrap(err, "fail to create resources")
 	}
+
 	if err := runner.WaitForVirtualMachineInstance(ctx, runner.GetVMIName()); err != nil {
 		return errors.Wrap(err, "fail to wait for resources")
 	}

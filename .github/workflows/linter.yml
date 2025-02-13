@@ -11,6 +11,7 @@ name: Lint Code Base
 on:
   push:
   pull_request:
+permissions: read-all
 jobs:
   get-sloc:
     name: Count Lines of Code
@@ -42,7 +43,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINTER_RULES_PATH: /
-          VALIDATE_CHECKOV: false
-          VALIDATE_GOOGLE_JAVA_FORMAT: false
-          VALIDATE_JAVA: false
-          VALIDATE_KUBERNETES_KUBECONFORM: false
+          VALIDATE_GO: false

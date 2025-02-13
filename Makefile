@@ -17,8 +17,8 @@ lint:
 	sudo -E $(DOCKER_CMD) run --rm -v $$(pwd):/tmp/lint \
 	-e RUN_LOCAL=true \
 	-e LINTER_RULES_PATH=/ \
-	-e VALIDATE_KUBERNETES_KUBEVAL=false \
 	-e KUBERNETES_KUBECONFORM_OPTIONS='-ignore-missing-schemas' \
+	-e VALIDATE_GO=false \
 	ghcr.io/super-linter/super-linter
 
 .PHONY: fmt

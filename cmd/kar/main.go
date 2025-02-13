@@ -87,7 +87,11 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
-		runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName())
+
+		if err := runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName()); err != nil {
+			log.Panicln(err.Error())
+		}
+
 		stop()
 	}()
 

@@ -19,7 +19,6 @@ package app_test
 import (
 	"context"
 	"errors"
-
 	"slices"
 
 	"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app"
@@ -96,14 +95,15 @@ var _ = Describe("Root Command", func() {
 
 	DescribeTable("initialization process", func(shouldSucceed bool, failure Failure, args ...string) {
 		cmd.SetArgs(args)
+		expectedFailure := errors.New("failure")
 		if HasOneOf(failure, Create) {
-			runner.createErr = errors.New("create failure")
+			runner.createErr = expectedFailure
 		}
 		if HasOneOf(failure, Delete) {
-			runner.deleteErr = errors.New("delete failure")
+			runner.deleteErr = expectedFailure
 		}
 		if HasOneOf(failure, Wait) {
-			runner.waitErr = errors.New("wait failure")
+			runner.waitErr = expectedFailure
 		}
 
 		err := cmd.Execute()

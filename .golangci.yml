@@ -10,22 +10,28 @@ linters:
   enable-all: true
   disable:
     - exportloopref # Deprecated (since v1.60.2) due to: Since Go1.22 (loopvar) this linter is no longer relevant. Replaced by copyloopvar.
-    - gomnd # Deprecated (since v1.58.0) due to: The linter has been renamed. Replaced by mnd.
-    - execinquery # Deprecated (since v1.58.0) due to: The repository of the linter has been archived by the owner.
     - exhaustruct
 linters-settings:
   depguard:
     rules:
       prevent_unmaintained_packages:
-        list-mode: lax # allow unless explicitely denied
-        files:
-          - $all
-          - "!$test"
         allow:
           - $gostd
-        deny:
-          - pkg: io/ioutil
-            desc: "replaced by io and os packages since Go 1.16: https://tip.golang.org/doc/go1.16#ioutil"
+          - github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app
+          - github.com/electrocucaracha/kubevirt-actions-runner/internal
+          - github.com/golang/mock/gomock
+          - github.com/pkg/errors
+          - github.com/spf13/cobra
+          - github.com/spf13/pflag
+          - github.com/spf13/viper
+          - k8s.io/api/core/v1
+          - k8s.io/apimachinery/pkg/apis/meta/v1
+          - k8s.io/utils/ptr
+          - kubevirt.io/api/core/v1
+          - kubevirt.io/client-go/containerizeddataimporter/fake
+          - kubevirt.io/client-go/kubecli
+          - kubevirt.io/client-go/kubevirt/fake
+          - kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1
   gomoddirectives:
     replace-allow-list:
       - k8s.io/kube-openapi
