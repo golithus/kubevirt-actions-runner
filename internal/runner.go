@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"time"
 
 	"github.com/pkg/errors"
@@ -231,6 +232,12 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 }
 
 func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineInstance, dataVolume string) error {
+	log.Printf("Entering DeleteResources for VMI: %s, DataVolume: %s", virtualMachineInstance, dataVolume)
+	startTime := time.Now()
+	defer func() {
+		log.Printf("DeleteResources for VMI: %s, DataVolume: %s took %s", virtualMachineInstance, dataVolume, time.Since(startTime))
+	}()
+
 	log.Printf("Cleaning %s Virtual Machine Instance resources\n",
 		virtualMachineInstance)
 

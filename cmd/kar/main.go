@@ -88,6 +88,7 @@ func main() {
 	go func() {
 		<-ctx.Done()
 
+		log.Println("DeleteResources called from main.go due to context cancellation or interrupt")
 		if err := runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName()); err != nil {
 			log.Panicln(err.Error())
 		}

@@ -18,6 +18,7 @@ package app
 
 import (
 	"context"
+	"log"
 
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/pkg/errors"
@@ -50,6 +51,7 @@ func run(ctx context.Context, runner runner.Runner, opts Opts) error {
 		return errors.Wrap(err, "fail to wait for resources")
 	}
 
+	log.Println("DeleteResources called from app.run after successful resource creation and VMI wait")
 	if err := runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName()); err != nil {
 		return errors.Wrap(err, "fail to delete resources")
 	}
