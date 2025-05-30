@@ -1,0 +1,1 @@
+{"go-coverage-action-fmt":1,"coverage_pct":64.86486486486487,"pkg_stats":{"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar":[0],"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app":[96.66666666666667],"github.com/electrocucaracha/kubevirt-actions-runner/internal":[74.59016393442623]},"skipped_count":0}
