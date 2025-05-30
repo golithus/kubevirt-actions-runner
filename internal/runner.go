@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8scorev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	v1 "kubevirt.io/api/core/v1"
@@ -238,8 +238,11 @@ func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, virtualMachineInstance string) error {
 	log.Printf("Watching %s Virtual Machine Instance\n", virtualMachineInstance)
 
-	const reportingElapse = 5.0 // Minutes
+	const reportingElapse = 5.0      // Minutes
 	const watchTimeoutMinutes = 55.0 // Proactively recreate watch before k8s 60 min timeout
+
+	// Store the VMI name for consistency
+	rc.virtualMachineInstance = virtualMachineInstance
 
 	for {
 		// Check if context is cancelled before creating a new watch
@@ -249,47 +252,45 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 		default:
 			// Continue with watch creation
 		}
-		
+
 		// Create a new watch
 		watch, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Watch(ctx, k8smetav1.ListOptions{})
 		if err != nil {
 			return errors.Wrap(err, "failed to watch the virtual machine instance")
 		}
 
-		// Always ensure watch is cleaned up properly
-		watchCleanup := func() {
-			watch.Stop()
-		}
-		defer watchCleanup() // Safety net in case we return unexpectedly
+		// Always ensure watch is cleaned up when we leave this iteration
+		defer watch.Stop()
 
 		lastTimeChecked := time.Now()
 		watchStartTime := time.Now()
 
-		// Use a channel to track when we should exit the watch loop
-		watchDone := make(chan struct{})
-		
+		// Use a channel to track when we should exit the watch loop due to context cancellation
+		ctxDone := make(chan struct{}, 1)
+
 		// Start a goroutine to monitor context cancellation
 		go func() {
 			select {
 			case <-ctx.Done():
 				watch.Stop() // This will cause the watch.ResultChan() to close
-				close(watchDone)
-			case <-watchDone:
-				// Watch already completed normally
+				ctxDone <- struct{}{}
 			}
 		}()
 
 		// Process watch events
+		var watchResult error
+		watchCompleted := false
+
 		for event := range watch.ResultChan() {
 			// Check if we're approaching the k8s watch timeout and need to recreate the watch
 			if time.Since(watchStartTime).Minutes() > watchTimeoutMinutes {
 				log.Printf("Proactively recreating watch for %s to avoid k8s timeout\n", virtualMachineInstance)
-				watchCleanup()
-				break // Exit this loop to create a new watch
+				watch.Stop() // Stop the watch to exit the loop and create a new one
+				break
 			}
 
 			vmi, ok := event.Object.(*v1.VirtualMachineInstance)
-			if ok && vmi.Name == rc.virtualMachineInstance { // Ensure it's the VMI we are interested in
+			if ok && vmi.Name == virtualMachineInstance { // Ensure it's the VMI we are interested in
 				// Check if the VMI's phase has changed or if it's time to report status
 				if vmi.Status.Phase != rc.currentStatus || time.Since(lastTimeChecked).Minutes() > reportingElapse {
 					rc.currentStatus = vmi.Status.Phase
@@ -298,13 +299,13 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 					switch rc.currentStatus {
 					case v1.Succeeded:
 						log.Printf("%s has successfully completed\n", virtualMachineInstance)
-						watchCleanup()
-						close(watchDone)
+						watchCompleted = true
+						watch.Stop() // Stop the watch to exit the loop
 						return nil
 					case v1.Failed:
 						log.Printf("%s has failed\n", virtualMachineInstance)
-						watchCleanup()
-						close(watchDone)
+						watchCompleted = true
+						watch.Stop() // Stop the watch to exit the loop
 						return ErrRunnerFailed
 					default:
 						log.Printf("%s has transitioned to %s phase \n", virtualMachineInstance, rc.currentStatus)
@@ -317,13 +318,15 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 			}
 		}
 
-		// Check if context was cancelled (will only reach here if the watch loop exited)
+		// If we're here, the watch loop exited without completing
+		if watchCompleted {
+			return watchResult
+		}
+
+		// Check if context was cancelled
 		select {
-		case <-ctx.Done():
+		case <-ctxDone:
 			return ctx.Err()
-		case <-watchDone:
-			// Watch completed normally with a result, exit the function
-			return nil
 		default:
 			// If we didn't break out of the loop due to watchTimeout, log unexpected closure
 			if time.Since(watchStartTime).Minutes() <= watchTimeoutMinutes {
@@ -332,7 +335,6 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 				time.Sleep(1 * time.Second)
 			}
 			// Continue to recreate the watch
-			continue
 		}
 	}
 }
