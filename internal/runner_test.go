@@ -1,5 +1,5 @@
 /*
-Copyright © 2023
+Copyright 2023
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package runner_test
 
 import (
 	"context"
+	"time"
 
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/golang/mock/gomock"
@@ -25,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	v1 "kubevirt.io/api/core/v1"
 	cdifake "kubevirt.io/client-go/containerizeddataimporter/fake"
 	"kubevirt.io/client-go/kubecli"
@@ -36,6 +38,7 @@ var _ = Describe("Runner", func() {
 	var virtClient *kubecli.MockKubevirtClient
 	var virtClientset *kubevirtfake.Clientset
 	var karRunner runner.Runner
+	var vmiInterface *kubecli.MockVirtualMachineInstanceInterface
 
 	const (
 		vmTemplate = "vm-template"
@@ -45,9 +48,10 @@ var _ = Describe("Runner", func() {
 
 	BeforeEach(func() {
 		virtClient = kubecli.NewMockKubevirtClient(gomock.NewController(GinkgoT()))
-		virtClientset = kubevirtfake.NewSimpleClientset(NewVirtualMachineInstance(vmInstance), NewVirtualMachine(vmTemplate))
+		virtClientset = kubevirtfake.NewSimpleClientset(NewVirtualMachine(vmTemplate), NewVirtualMachineInstance(vmInstance))
 		cdiClientset := cdifake.NewSimpleClientset(NewDataVolume(dataVolume))
 
+		vmiInterface = kubecli.NewMockVirtualMachineInstanceInterface(gomock.NewController(GinkgoT()))
 		virtClient.EXPECT().CdiClient().Return(cdiClientset).AnyTimes()
 
 		karRunner = runner.NewRunner(k8sv1.NamespaceDefault, virtClient)
@@ -102,9 +106,131 @@ var _ = Describe("Runner", func() {
 	},
 		Entry("when the runner has a data volume", true, vmInstance, dataVolume),
 		Entry("when the runner doesn't have data volumes", true, vmInstance, ""),
-		Entry("when the runner doesn't exist", false, "runner-abc098", ""),
-		Entry("when the data volume doesn't exist", false, vmInstance, "dv-abc098"),
+		Entry("when the runner doesn't exist", true, "runner-abc098", ""),
+		Entry("when the data volume doesn't exist", true, vmInstance, "dv-abc098"),
 	)
+
+	Describe("WaitForVirtualMachineInstance", func() {
+		var fakeWatcher *watch.FakeWatcher
+		var kubevirtRunner *runner.KubevirtRunner
+		var ctx context.Context
+		var cancel context.CancelFunc
+
+		BeforeEach(func() {
+			fakeWatcher = watch.NewFake()
+			ctx, cancel = context.WithCancel(context.Background())
+			kubevirtRunner = runner.NewRunner(k8sv1.NamespaceDefault, virtClient)
+			
+			// Setup the mock expectations
+			virtClient.EXPECT().VirtualMachineInstance(k8sv1.NamespaceDefault).Return(vmiInterface).AnyTimes()
+			
+			// Set VMI name so the function knows which VMI to watch
+			kubevirtRunner.SetVMINameForTesting(vmInstance)
+		})
+
+		AfterEach(func() {
+			cancel()
+		})
+
+		It("should return nil when VMI succeeds", func() {
+			// Setup the watch mock
+			vmiInterface.EXPECT().Watch(gomock.Any(), gomock.Any()).Return(fakeWatcher, nil)
+
+			// Start the wait function in a goroutine
+			errChan := make(chan error)
+			go func() {
+				errChan <- kubevirtRunner.WaitForVirtualMachineInstance(ctx, vmInstance)
+			}()
+
+			// Send a successful VMI event
+			vmi := NewVirtualMachineInstance(vmInstance)
+			vmi.Status.Phase = v1.Succeeded
+			fakeWatcher.Add(vmi)
+
+			// Expect no error
+			Eventually(errChan).Should(Receive(BeNil()))
+		})
+
+		It("should return ErrRunnerFailed when VMI fails", func() {
+			// Setup the watch mock
+			vmiInterface.EXPECT().Watch(gomock.Any(), gomock.Any()).Return(fakeWatcher, nil)
+
+			// Start the wait function in a goroutine
+			errChan := make(chan error)
+			go func() {
+				errChan <- kubevirtRunner.WaitForVirtualMachineInstance(ctx, vmInstance)
+			}()
+
+			// Send a failed VMI event
+			vmi := NewVirtualMachineInstance(vmInstance)
+			vmi.Status.Phase = v1.Failed
+			fakeWatcher.Add(vmi)
+
+			// Expect runner failed error
+			Eventually(errChan).Should(Receive(Equal(runner.ErrRunnerFailed)))
+		})
+
+		It("should recreate watch when it closes prematurely", func() {
+			// Setup expectations for multiple watches
+			callCount := 0
+			vmiInterface.EXPECT().Watch(gomock.Any(), gomock.Any()).DoAndReturn(
+				func(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
+					callCount++
+					if callCount == 1 {
+						// First watch will be closed prematurely
+						go func() {
+							time.Sleep(100 * time.Millisecond)
+							fakeWatcher.Stop()
+						}()
+						return fakeWatcher, nil
+					} else {
+						// Second watch will receive a success event
+						newWatcher := watch.NewFake()
+						go func() {
+							time.Sleep(100 * time.Millisecond)
+							vmi := NewVirtualMachineInstance(vmInstance)
+							vmi.Status.Phase = v1.Succeeded
+							newWatcher.Add(vmi)
+						}()
+						return newWatcher, nil
+					}
+				}).Times(2)
+
+			// Start the wait function in a goroutine
+			errChan := make(chan error)
+			go func() {
+				errChan <- kubevirtRunner.WaitForVirtualMachineInstance(ctx, vmInstance)
+			}()
+
+			// Expect no error and that multiple watches were created
+			Eventually(errChan, 2*time.Second).Should(Receive(BeNil()))
+			Expect(callCount).To(Equal(2))
+		})
+
+		It("should respect context cancellation", func() {
+			// Create a new context with cancel so we can control the test independently
+			testCtx, testCancel := context.WithCancel(context.Background())
+			defer testCancel()
+
+			// Setup the watch mock - allow up to 1 watch call in case it's called before we cancel
+			vmiInterface.EXPECT().Watch(gomock.Any(), gomock.Any()).Return(fakeWatcher, nil).MaxTimes(1)
+
+			// Start the wait function in a goroutine
+			errChan := make(chan error, 1)
+			go func() {
+				errChan <- kubevirtRunner.WaitForVirtualMachineInstance(testCtx, vmInstance)
+			}()
+
+			// Give it a small amount of time to potentially create the watch
+			time.Sleep(100 * time.Millisecond)
+			
+			// Cancel the context
+			testCancel()
+
+			// Expect context canceled error
+			Eventually(errChan, 2*time.Second).Should(Receive(MatchError(context.Canceled)))
+		})
+	})
 })
 
 func NewVirtualMachine(name string) *v1.VirtualMachine {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8scorev1 "k8s.io/api/core/v1"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -238,44 +239,102 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 	log.Printf("Watching %s Virtual Machine Instance\n", virtualMachineInstance)
 
 	const reportingElapse = 5.0 // Minutes
+	const watchTimeoutMinutes = 55.0 // Proactively recreate watch before k8s 60 min timeout
 
-	watch, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Watch(ctx, k8smetav1.ListOptions{})
-	if err != nil {
-		return errors.Wrap(err, "failed to watch the virtual machine instance")
-	}
-	defer watch.Stop()
+	for {
+		// Check if context is cancelled before creating a new watch
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Continue with watch creation
+		}
+		
+		// Create a new watch
+		watch, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Watch(ctx, k8smetav1.ListOptions{})
+		if err != nil {
+			return errors.Wrap(err, "failed to watch the virtual machine instance")
+		}
 
-	lastTimeChecked := time.Now()
+		// Always ensure watch is cleaned up properly
+		watchCleanup := func() {
+			watch.Stop()
+		}
+		defer watchCleanup() // Safety net in case we return unexpectedly
 
-	for event := range watch.ResultChan() {
-		vmi, ok := event.Object.(*v1.VirtualMachineInstance)
-		if ok && vmi.Name == rc.virtualMachineInstance { // Ensure it's the VMI we are interested in
-			// Check if the VMI's phase has changed or if it's time to report status
-			if vmi.Status.Phase != rc.currentStatus || time.Since(lastTimeChecked).Minutes() > reportingElapse {
-				rc.currentStatus = vmi.Status.Phase
-				lastTimeChecked = time.Now()
+		lastTimeChecked := time.Now()
+		watchStartTime := time.Now()
 
-				switch rc.currentStatus {
-				case v1.Succeeded:
-					log.Printf("%s has successfully completed\n", virtualMachineInstance)
-
-					return nil
-				case v1.Failed:
-					log.Printf("%s has failed\n", virtualMachineInstance)
-
-					return ErrRunnerFailed
-				default:
-					log.Printf("%s has transitioned to %s phase \n", virtualMachineInstance, rc.currentStatus)
-				}
+		// Use a channel to track when we should exit the watch loop
+		watchDone := make(chan struct{})
+		
+		// Start a goroutine to monitor context cancellation
+		go func() {
+			select {
+			case <-ctx.Done():
+				watch.Stop() // This will cause the watch.ResultChan() to close
+				close(watchDone)
+			case <-watchDone:
+				// Watch already completed normally
 			}
-		} else if time.Since(lastTimeChecked).Minutes() > reportingElapse {
-			// If no relevant event received for a while, log current known status
-			log.Printf("%s is in %s phase \n", virtualMachineInstance, rc.currentStatus)
-			lastTimeChecked = time.Now()
+		}()
+
+		// Process watch events
+		for event := range watch.ResultChan() {
+			// Check if we're approaching the k8s watch timeout and need to recreate the watch
+			if time.Since(watchStartTime).Minutes() > watchTimeoutMinutes {
+				log.Printf("Proactively recreating watch for %s to avoid k8s timeout\n", virtualMachineInstance)
+				watchCleanup()
+				break // Exit this loop to create a new watch
+			}
+
+			vmi, ok := event.Object.(*v1.VirtualMachineInstance)
+			if ok && vmi.Name == rc.virtualMachineInstance { // Ensure it's the VMI we are interested in
+				// Check if the VMI's phase has changed or if it's time to report status
+				if vmi.Status.Phase != rc.currentStatus || time.Since(lastTimeChecked).Minutes() > reportingElapse {
+					rc.currentStatus = vmi.Status.Phase
+					lastTimeChecked = time.Now()
+
+					switch rc.currentStatus {
+					case v1.Succeeded:
+						log.Printf("%s has successfully completed\n", virtualMachineInstance)
+						watchCleanup()
+						close(watchDone)
+						return nil
+					case v1.Failed:
+						log.Printf("%s has failed\n", virtualMachineInstance)
+						watchCleanup()
+						close(watchDone)
+						return ErrRunnerFailed
+					default:
+						log.Printf("%s has transitioned to %s phase \n", virtualMachineInstance, rc.currentStatus)
+					}
+				}
+			} else if time.Since(lastTimeChecked).Minutes() > reportingElapse {
+				// If no relevant event received for a while, log current known status
+				log.Printf("%s is in %s phase \n", virtualMachineInstance, rc.currentStatus)
+				lastTimeChecked = time.Now()
+			}
+		}
+
+		// Check if context was cancelled (will only reach here if the watch loop exited)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-watchDone:
+			// Watch completed normally with a result, exit the function
+			return nil
+		default:
+			// If we didn't break out of the loop due to watchTimeout, log unexpected closure
+			if time.Since(watchStartTime).Minutes() <= watchTimeoutMinutes {
+				log.Printf("Watch for %s closed unexpectedly, recreating...\n", virtualMachineInstance)
+				// Small delay to avoid hammering the API if there's an issue
+				time.Sleep(1 * time.Second)
+			}
+			// Continue to recreate the watch
+			continue
 		}
 	}
-
-	return nil // Should ideally not be reached if context is managed correctly, implies watch closed prematurely
 }
 
 // DeleteResources removes the VirtualMachineInstance and its associated DataVolume.
@@ -291,18 +350,24 @@ func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineIns
 		virtualMachineInstance)
 
 	if err := rc.virtClient.VirtualMachineInstance(rc.namespace).Delete(
-		ctx, virtualMachineInstance, k8smetav1.DeleteOptions{}); err != nil {
+		ctx, virtualMachineInstance, k8smetav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		return errors.Wrap(err, "fail to delete runner instance")
 	}
 
 	if len(dataVolume) > 0 {
 		if err := rc.virtClient.CdiClient().CdiV1beta1().DataVolumes(rc.namespace).Delete(ctx, dataVolume,
-			k8smetav1.DeleteOptions{}); err != nil {
+			k8smetav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return errors.Wrap(err, "fail to delete runner data volume")
 		}
 	}
 
 	return nil
+}
+
+// SetVMINameForTesting is a helper method for unit tests to set the virtualMachineInstance field
+// directly. This should only be used in test code.
+func (rc *KubevirtRunner) SetVMINameForTesting(name string) {
+	rc.virtualMachineInstance = name
 }
 
 // NewRunner creates a new KubevirtRunner instance.
