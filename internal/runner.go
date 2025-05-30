@@ -76,6 +76,7 @@ type KubevirtRunner struct {
 	dataVolume             string
 	virtualMachineInstance string
 	currentStatus          v1.VirtualMachineInstancePhase
+	persistentVolumeClaim  string
 }
 
 var _ Runner = (*KubevirtRunner)(nil)
@@ -351,15 +352,49 @@ func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineIns
 	log.Printf("Cleaning %s Virtual Machine Instance resources\n",
 		virtualMachineInstance)
 
-	if err := rc.virtClient.VirtualMachineInstance(rc.namespace).Delete(
-		ctx, virtualMachineInstance, k8smetav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		return errors.Wrap(err, "fail to delete runner instance")
+	// Check if context is already canceled, if so create a new one with timeout
+	// This ensures cleanup operations can complete even if the original context was canceled
+	var deleteCtx context.Context
+	var cancel context.CancelFunc
+
+	if ctx.Err() != nil {
+		// Original context is already canceled, create a new one with a timeout
+		log.Printf("Original context was canceled, creating a new one for cleanup operations")
+		deleteCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+	} else {
+		// Use the original context if it's still valid
+		deleteCtx = ctx
 	}
 
+	// Delete the VMI
+	if err := rc.virtClient.VirtualMachineInstance(rc.namespace).Delete(
+		deleteCtx, virtualMachineInstance, k8smetav1.DeleteOptions{}); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			log.Printf("Warning: Failed to delete VMI %s: %v", virtualMachineInstance, err)
+			// We continue with other deletions instead of returning early
+		}
+	}
+
+	// Delete the DataVolume if provided
 	if len(dataVolume) > 0 {
-		if err := rc.virtClient.CdiClient().CdiV1beta1().DataVolumes(rc.namespace).Delete(ctx, dataVolume,
-			k8smetav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-			return errors.Wrap(err, "fail to delete runner data volume")
+		if err := rc.virtClient.CdiClient().CdiV1beta1().DataVolumes(rc.namespace).Delete(
+			deleteCtx, dataVolume, k8smetav1.DeleteOptions{}); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				log.Printf("Warning: Failed to delete DataVolume %s: %v", dataVolume, err)
+				// We continue instead of returning early
+			}
+		}
+	}
+
+	// Check if there were any PVCs created from snapshots that need to be cleaned up
+	// We don't return errors for PVC cleanup failures to ensure other resources are still deleted
+	if len(rc.persistentVolumeClaim) > 0 {
+		if err := rc.virtClient.CoreV1().PersistentVolumeClaims(rc.namespace).Delete(
+			deleteCtx, rc.persistentVolumeClaim, k8smetav1.DeleteOptions{}); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				log.Printf("Warning: Failed to delete PVC %s: %v", rc.persistentVolumeClaim, err)
+			}
 		}
 	}
 
@@ -370,6 +405,12 @@ func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineIns
 // directly. This should only be used in test code.
 func (rc *KubevirtRunner) SetVMINameForTesting(name string) {
 	rc.virtualMachineInstance = name
+}
+
+// SetPersistentVolumeClaimForTesting is a helper method for unit tests to set the persistentVolumeClaim field
+// directly. This should only be used in test code.
+func (rc *KubevirtRunner) SetPersistentVolumeClaimForTesting(name string) {
+	rc.persistentVolumeClaim = name
 }
 
 // NewRunner creates a new KubevirtRunner instance.

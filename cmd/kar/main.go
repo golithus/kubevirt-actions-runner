@@ -1,5 +1,5 @@
 /*
-Copyright © 2024
+Copyright 2024
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"time"
 
 	"github.com/electrocucaracha/kubevirt-actions-runner/cmd/kar/app"
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
@@ -89,8 +90,13 @@ func main() {
 		<-ctx.Done()
 
 		log.Println("DeleteResources called from main.go due to context cancellation or interrupt")
-		if err := runner.DeleteResources(ctx, runner.GetVMIName(), runner.GetDataVolumeName()); err != nil {
-			log.Panicln(err.Error())
+		// Create a new context with a timeout specifically for cleanup
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+
+		if err := runner.DeleteResources(cleanupCtx, runner.GetVMIName(), runner.GetDataVolumeName()); err != nil {
+			log.Printf("Error during resource cleanup: %v\n", err)
+			// We don't panic here, as we're already in shutdown and want to report the error but continue
 		}
 
 		stop()
