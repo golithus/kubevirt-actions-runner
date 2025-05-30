@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"runtime/debug"
 	"time"
 
 	"github.com/pkg/errors"
