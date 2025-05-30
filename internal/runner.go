@@ -1,19 +1,8 @@
-/*
-Copyright © 2024
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-	http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
+// Package runner provides the core logic for managing KubeVirt VirtualMachineInstances (VMIs)
+// that function as ephemeral GitHub Actions runners. It handles the lifecycle of these runners,
+// including their creation from templates, monitoring their execution, and cleaning them up.
+// This package is the engine that interacts with the KubeVirt API to provide
+// VM-based runner capabilities to the broader kubevirt-actions-runner application.
 package runner
 
 import (
@@ -38,6 +27,9 @@ const (
 	runnerInfoPath       string = "runner-info.json"
 )
 
+// Runner defines the interface for managing a virtual machine-based runner.
+// It abstracts the operations required to create, monitor, and delete
+// the underlying compute resources for a job.
 type Runner interface {
 	CreateResources(ctx context.Context, vmTemplate string, runnerName string, jitConfig string) error
 	WaitForVirtualMachineInstance(ctx context.Context, vmi string) error
@@ -46,6 +38,37 @@ type Runner interface {
 	GetDataVolumeName() string
 }
 
+// KubevirtRunner is an implementation of the Runner interface that uses KubeVirt
+// to create and manage VirtualMachineInstances (VMIs) as GitHub Actions runners.
+//
+// How it fits in the application:
+// The kubevirt-actions-runner application is designed to be a runner for GitHub Actions
+// that executes jobs within ephemeral KubeVirt VMs. The KubevirtRunner is the central
+// component responsible for all interactions with the KubeVirt API.
+//
+// Workflow:
+//  1. Initialization: An instance is created via NewRunner, typically by the main application
+//     logic in the `cmd/` directory, providing it with a KubeVirt client and namespace.
+//  2. Resource Creation (`CreateResources`):
+//     - Takes a VM template name, a unique runner name, and GitHub Actions JIT (Just-In-Time)
+//     configuration.
+//     - Fetches the specified KubeVirt VirtualMachine (VM) resource to use as a base template.
+//     - Constructs a new VirtualMachineInstance (VMI) specification.
+//     - Injects the JIT configuration into the VMI's annotations. This JIT config is then
+//     made available to the VMI's guest OS via the Downward API (using `generateRunnerInfoVolume`),
+//     allowing the runner agent inside the VM to register with GitHub.
+//     - Handles associated DataVolumes if defined in the VM template.
+//     - Creates the VMI and any DataVolumes using the KubeVirt client.
+//  3. Monitoring (`WaitForVirtualMachineInstance`):
+//     - After creating the VMI, the application calls this method to watch the VMI's status.
+//     - It blocks until the VMI reaches a terminal state (Succeeded or Failed), indicating
+//     the completion or failure of the GitHub Actions job.
+//  4. Resource Deletion (`DeleteResources`):
+//     - Once the job is finished (or if the application is interrupted), this method is called
+//     to clean up by deleting the VMI and any associated DataVolumes.
+//
+// This structure allows the main application to orchestrate the runner lifecycle without
+// needing to know the specifics of KubeVirt API interactions, which are encapsulated here.
 type KubevirtRunner struct {
 	virtClient             kubecli.KubevirtClient
 	namespace              string
@@ -56,14 +79,20 @@ type KubevirtRunner struct {
 
 var _ Runner = (*KubevirtRunner)(nil)
 
+// GetVMIName returns the name of the VirtualMachineInstance managed by this runner.
 func (rc *KubevirtRunner) GetVMIName() string {
 	return rc.virtualMachineInstance
 }
 
+// GetDataVolumeName returns the name of the DataVolume associated with this runner, if any.
 func (rc *KubevirtRunner) GetDataVolumeName() string {
 	return rc.dataVolume
 }
 
+// getResources prepares the VirtualMachineInstance and DataVolume specifications
+// based on a template and runtime parameters. It fetches a base VirtualMachine template,
+// customizes it with the runnerName and jitConfig (by adding it to annotations),
+// and prepares any DataVolume definitions.
 func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerName, jitConfig string) (
 	*v1.VirtualMachineInstance, *v1beta1.DataVolume, error,
 ) {
@@ -80,6 +109,9 @@ func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerNa
 		virtualMachineInstance.Annotations = make(map[string]string)
 	}
 
+	// Embed the JIT configuration into an annotation. This will be passed to the VM
+	// via the Downward API (see generateRunnerInfoVolume) so the runner agent inside
+	// the VM can configure itself.
 	jri := map[string]interface{}{
 		"jitconfig": jitConfig,
 	}
@@ -93,16 +125,19 @@ func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerNa
 
 	var dataVolume *v1beta1.DataVolume
 
+	// If the VM template includes DataVolumeTemplates, create corresponding DataVolume
+	// resources for the new VMI.
 	for _, dvt := range virtualMachine.Spec.DataVolumeTemplates {
 		for _, volume := range virtualMachineInstance.Spec.Volumes {
 			if volume.DataVolume != nil && volume.DataVolume.Name == dvt.Name {
 				dataVolume = &v1beta1.DataVolume{
 					ObjectMeta: k8smetav1.ObjectMeta{
-						Name: fmt.Sprintf("%s-%s", dvt.Name, runnerName),
+						Name: fmt.Sprintf("%s-%s", dvt.Name, runnerName), // Unique name for the DV instance
 					},
 					Spec: dvt.Spec,
 				}
 
+				// Update the VMI's volume spec to point to the newly named DataVolume
 				volume.DataVolume.Name = dataVolume.Name
 
 				break
@@ -110,19 +145,24 @@ func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerNa
 		}
 	}
 
+	// Add the special volume that exposes the runner JIT config annotation as a file.
 	virtualMachineInstance.Spec.Volumes = append(virtualMachineInstance.Spec.Volumes, generateRunnerInfoVolume())
 
 	return virtualMachineInstance, dataVolume, nil
 }
 
+// generateRunnerInfoVolume creates a KubeVirt Volume definition that uses the
+// Downward API to project the VMI's annotation (containing the JIT config)
+// into a file within the VMI. This allows the runner agent inside the VM to
+// access its configuration.
 func generateRunnerInfoVolume() v1.Volume {
 	return v1.Volume{
-		Name: runnerInfoVolume,
+		Name: runnerInfoVolume, // "runner-info"
 		VolumeSource: v1.VolumeSource{
 			DownwardAPI: &v1.DownwardAPIVolumeSource{
 				Fields: []k8scorev1.DownwardAPIVolumeFile{
 					{
-						Path: runnerInfoPath,
+						Path: runnerInfoPath, // "runner-info.json"
 						FieldRef: &k8scorev1.ObjectFieldSelector{
 							FieldPath: fmt.Sprintf("metadata.annotations['%s']", runnerInfoAnnotation),
 						},
@@ -133,6 +173,9 @@ func generateRunnerInfoVolume() v1.Volume {
 	}
 }
 
+// CreateResources creates the KubeVirt VirtualMachineInstance and any associated
+// DataVolumes required for the runner. It uses a VM template and customizes it
+// with the provided runner name and JIT configuration.
 func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 	vmTemplate, runnerName, jitConfig string,
 ) error {
@@ -161,18 +204,19 @@ func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 		return errors.Wrap(err, "fail to create runner instance")
 	}
 
-	rc.virtualMachineInstance = virtualMachineInstance.Name
+	rc.virtualMachineInstance = virtualMachineInstance.Name // Store the name of the created VMI
 
 	if dataVolume != nil {
 		log.Printf("Creating %s Data Volume\n", dataVolume.Name)
 
+		// Set OwnerReference so the DataVolume is garbage collected with the VMI
 		dataVolume.OwnerReferences = []k8smetav1.OwnerReference{
 			{
 				APIVersion: "kubevirt.io/v1",
 				Kind:       "VirtualMachineInstance",
 				Name:       vmi.Name,
 				UID:        vmi.UID,
-				Controller: ptr.To(false),
+				Controller: ptr.To(false), // Not a controlling owner, but an owner
 			},
 		}
 
@@ -181,16 +225,19 @@ func (rc *KubevirtRunner) CreateResources(ctx context.Context,
 			return errors.Wrap(err, "cannot create data volume")
 		}
 
-		rc.dataVolume = dataVolume.Name
+		rc.dataVolume = dataVolume.Name // Store the name of the created DataVolume
 	}
 
 	return nil
 }
 
+// WaitForVirtualMachineInstance watches the specified VirtualMachineInstance until it
+// reaches a terminal phase (Succeeded or Failed). It logs phase transitions and
+// periodically reports the current status.
 func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, virtualMachineInstance string) error {
 	log.Printf("Watching %s Virtual Machine Instance\n", virtualMachineInstance)
 
-	const reportingElapse = 5.0
+	const reportingElapse = 5.0 // Minutes
 
 	watch, err := rc.virtClient.VirtualMachineInstance(rc.namespace).Watch(ctx, k8smetav1.ListOptions{})
 	if err != nil {
@@ -202,8 +249,9 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 
 	for event := range watch.ResultChan() {
 		vmi, ok := event.Object.(*v1.VirtualMachineInstance)
-		if ok && vmi.Name == rc.virtualMachineInstance {
-			if vmi.Status.Phase != rc.currentStatus {
+		if ok && vmi.Name == rc.virtualMachineInstance { // Ensure it's the VMI we are interested in
+			// Check if the VMI's phase has changed or if it's time to report status
+			if vmi.Status.Phase != rc.currentStatus || time.Since(lastTimeChecked).Minutes() > reportingElapse {
 				rc.currentStatus = vmi.Status.Phase
 				lastTimeChecked = time.Now()
 
@@ -219,17 +267,19 @@ func (rc *KubevirtRunner) WaitForVirtualMachineInstance(ctx context.Context, vir
 				default:
 					log.Printf("%s has transitioned to %s phase \n", virtualMachineInstance, rc.currentStatus)
 				}
-			} else if time.Since(lastTimeChecked).Minutes() > reportingElapse {
-				log.Printf("%s is in %s phase \n", virtualMachineInstance, rc.currentStatus)
-
-				lastTimeChecked = time.Now()
 			}
+		} else if time.Since(lastTimeChecked).Minutes() > reportingElapse {
+			// If no relevant event received for a while, log current known status
+			log.Printf("%s is in %s phase \n", virtualMachineInstance, rc.currentStatus)
+			lastTimeChecked = time.Now()
 		}
 	}
 
-	return nil
+	return nil // Should ideally not be reached if context is managed correctly, implies watch closed prematurely
 }
 
+// DeleteResources removes the VirtualMachineInstance and its associated DataVolume.
+// It includes conditional logging to avoid interference with test runners.
 func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineInstance, dataVolume string) error {
 	log.Printf("Entering DeleteResources for VMI: %s, DataVolume: %s", virtualMachineInstance, dataVolume)
 	startTime := time.Now()
@@ -255,6 +305,8 @@ func (rc *KubevirtRunner) DeleteResources(ctx context.Context, virtualMachineIns
 	return nil
 }
 
+// NewRunner creates a new KubevirtRunner instance.
+// It requires the Kubernetes namespace and a KubeVirt client.
 func NewRunner(namespace string, virtClient kubecli.KubevirtClient) *KubevirtRunner {
 	return &KubevirtRunner{
 		namespace:  namespace,
