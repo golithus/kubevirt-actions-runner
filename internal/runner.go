@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	k8scorev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	v1 "kubevirt.io/api/core/v1"
@@ -139,6 +140,33 @@ func (rc *KubevirtRunner) getResources(ctx context.Context, vmTemplate, runnerNa
 					Spec: dvt.Spec,
 				}
 
+				// If source is a VolumeSnapshot, use its restoreSize for exact size matching.
+				// This enables fast snapshot cloning in storage backends like Mayastor.
+				if dvt.Spec.Source != nil && dvt.Spec.Source.Snapshot != nil {
+					snapshotSource := dvt.Spec.Source.Snapshot
+					snapshotNamespace := snapshotSource.Namespace
+
+					if snapshotNamespace == "" {
+						snapshotNamespace = rc.namespace
+					}
+
+					restoreSize, err := rc.getSnapshotRestoreSize(ctx, snapshotNamespace, snapshotSource.Name)
+					if err != nil {
+						log.Printf("Warning: could not fetch snapshot size for %s/%s: %v",
+							snapshotNamespace, snapshotSource.Name, err)
+						// Continue with template-specified size as fallback
+					} else if restoreSize != nil {
+						log.Printf("Using snapshot restoreSize %s for DataVolume %s",
+							restoreSize.String(), dataVolume.Name)
+
+						if dataVolume.Spec.Storage != nil {
+							dataVolume.Spec.Storage.Resources.Requests[k8scorev1.ResourceStorage] = *restoreSize
+						} else if dataVolume.Spec.PVC != nil {
+							dataVolume.Spec.PVC.Resources.Requests[k8scorev1.ResourceStorage] = *restoreSize
+						}
+					}
+				}
+
 				// Update the VMI's volume spec to point to the newly named DataVolume
 				volume.DataVolume.Name = dataVolume.Name
 
@@ -173,6 +201,27 @@ func generateRunnerInfoVolume() v1.Volume {
 			},
 		},
 	}
+}
+
+// getSnapshotRestoreSize fetches the restoreSize from a VolumeSnapshot.
+// Returns nil, nil if the snapshot exists but doesn't have a restoreSize yet.
+func (rc *KubevirtRunner) getSnapshotRestoreSize(
+	ctx context.Context,
+	namespace, name string,
+) (*resource.Quantity, error) {
+	volumeSnapshot, err := rc.virtClient.KubernetesSnapshotClient().
+		SnapshotV1().
+		VolumeSnapshots(namespace).
+		Get(ctx, name, k8smetav1.GetOptions{})
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get VolumeSnapshot %s/%s", namespace, name)
+	}
+
+	if volumeSnapshot.Status == nil || volumeSnapshot.Status.RestoreSize == nil {
+		return nil, nil //nolint:nilnil // Snapshot exists but restoreSize not available yet
+	}
+
+	return volumeSnapshot.Status.RestoreSize, nil
 }
 
 // CreateResources creates the KubeVirt VirtualMachineInstance and any associated

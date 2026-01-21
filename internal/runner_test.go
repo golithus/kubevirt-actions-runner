@@ -22,13 +22,16 @@ import (
 
 	runner "github.com/electrocucaracha/kubevirt-actions-runner/internal"
 	"github.com/golang/mock/gomock"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	v1 "kubevirt.io/api/core/v1"
 	cdifake "kubevirt.io/client-go/containerizeddataimporter/fake"
+	snapshotfake "kubevirt.io/client-go/externalsnapshotter/fake"
 	"kubevirt.io/client-go/kubecli"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	"kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
@@ -250,6 +253,126 @@ var _ = Describe("Runner", func() {
 			Eventually(errChan, testTimeout).Should(Receive(MatchError(context.Canceled)))
 		})
 	})
+
+	Describe("Snapshot-sourced DataVolumes", func() {
+		const (
+			snapshotName       = "test-snapshot"
+			vmWithSnapshotName = "vm-with-snapshot"
+		)
+
+		var snapshotClientset *snapshotfake.Clientset
+
+		BeforeEach(func() {
+			virtClient = kubecli.NewMockKubevirtClient(gomock.NewController(GinkgoT()))
+		})
+
+		Context("when creating resources with snapshot-sourced DataVolume", func() {
+			It("should use snapshot restoreSize when available", func() {
+				// Create a VolumeSnapshot with a known restoreSize
+				restoreSize := resource.MustParse("20Gi")
+				snapshot := NewVolumeSnapshot(snapshotName, &restoreSize)
+				snapshotClientset = snapshotfake.NewSimpleClientset(snapshot)
+
+				// Create VM with snapshot-sourced DataVolumeTemplate
+				vm := NewVirtualMachineWithSnapshot(vmWithSnapshotName, snapshotName)
+				virtClientset = kubevirtfake.NewSimpleClientset(vm)
+				cdiClientset := cdifake.NewSimpleClientset()
+
+				virtClient.EXPECT().VirtualMachine(k8sv1.NamespaceDefault).Return(
+					virtClientset.KubevirtV1().VirtualMachines(k8sv1.NamespaceDefault),
+				)
+				virtClient.EXPECT().VirtualMachineInstance(k8sv1.NamespaceDefault).Return(
+					virtClientset.KubevirtV1().VirtualMachineInstances(k8sv1.NamespaceDefault),
+				)
+				virtClient.EXPECT().CdiClient().Return(cdiClientset).AnyTimes()
+				virtClient.EXPECT().KubernetesSnapshotClient().Return(snapshotClientset).AnyTimes()
+
+				karRunner := runner.NewRunner(k8sv1.NamespaceDefault, virtClient)
+				err := karRunner.CreateResources(context.TODO(), vmWithSnapshotName, "test-runner", "jitConfig")
+
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify the DataVolume was created with the snapshot's restoreSize
+				dvList, err := cdiClientset.CdiV1beta1().DataVolumes(k8sv1.NamespaceDefault).List(
+					context.TODO(), metav1.ListOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(dvList.Items).To(HaveLen(1))
+
+				dv := dvList.Items[0]
+				Expect(dv.Spec.Storage.Resources.Requests[k8sv1.ResourceStorage]).To(Equal(restoreSize))
+			})
+
+			It("should fallback to template size when snapshot has no restoreSize", func() {
+				// Create a VolumeSnapshot without restoreSize
+				snapshot := NewVolumeSnapshot(snapshotName, nil)
+				snapshotClientset = snapshotfake.NewSimpleClientset(snapshot)
+
+				// Create VM with snapshot-sourced DataVolumeTemplate
+				vm := NewVirtualMachineWithSnapshot(vmWithSnapshotName, snapshotName)
+				virtClientset = kubevirtfake.NewSimpleClientset(vm)
+				cdiClientset := cdifake.NewSimpleClientset()
+
+				virtClient.EXPECT().VirtualMachine(k8sv1.NamespaceDefault).Return(
+					virtClientset.KubevirtV1().VirtualMachines(k8sv1.NamespaceDefault),
+				)
+				virtClient.EXPECT().VirtualMachineInstance(k8sv1.NamespaceDefault).Return(
+					virtClientset.KubevirtV1().VirtualMachineInstances(k8sv1.NamespaceDefault),
+				)
+				virtClient.EXPECT().CdiClient().Return(cdiClientset).AnyTimes()
+				virtClient.EXPECT().KubernetesSnapshotClient().Return(snapshotClientset).AnyTimes()
+
+				karRunner := runner.NewRunner(k8sv1.NamespaceDefault, virtClient)
+				err := karRunner.CreateResources(context.TODO(), vmWithSnapshotName, "test-runner", "jitConfig")
+
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify the DataVolume was created with the template's original size
+				dvList, err := cdiClientset.CdiV1beta1().DataVolumes(k8sv1.NamespaceDefault).List(
+					context.TODO(), metav1.ListOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(dvList.Items).To(HaveLen(1))
+
+				dv := dvList.Items[0]
+				templateSize := resource.MustParse("10Gi") // This is the template size
+				Expect(dv.Spec.Storage.Resources.Requests[k8sv1.ResourceStorage]).To(Equal(templateSize))
+			})
+
+			It("should fallback to template size when snapshot fetch fails", func() {
+				// Create an empty snapshot clientset (snapshot doesn't exist)
+				snapshotClientset = snapshotfake.NewSimpleClientset()
+
+				// Create VM with snapshot-sourced DataVolumeTemplate
+				vm := NewVirtualMachineWithSnapshot(vmWithSnapshotName, snapshotName)
+				virtClientset = kubevirtfake.NewSimpleClientset(vm)
+				cdiClientset := cdifake.NewSimpleClientset()
+
+				virtClient.EXPECT().VirtualMachine(k8sv1.NamespaceDefault).Return(
+					virtClientset.KubevirtV1().VirtualMachines(k8sv1.NamespaceDefault),
+				)
+				virtClient.EXPECT().VirtualMachineInstance(k8sv1.NamespaceDefault).Return(
+					virtClientset.KubevirtV1().VirtualMachineInstances(k8sv1.NamespaceDefault),
+				)
+				virtClient.EXPECT().CdiClient().Return(cdiClientset).AnyTimes()
+				virtClient.EXPECT().KubernetesSnapshotClient().Return(snapshotClientset).AnyTimes()
+
+				karRunner := runner.NewRunner(k8sv1.NamespaceDefault, virtClient)
+				err := karRunner.CreateResources(context.TODO(), vmWithSnapshotName, "test-runner", "jitConfig")
+
+				// Should still succeed even if snapshot fetch fails
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify the DataVolume was created with the template's original size
+				dvList, err := cdiClientset.CdiV1beta1().DataVolumes(k8sv1.NamespaceDefault).List(
+					context.TODO(), metav1.ListOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(dvList.Items).To(HaveLen(1))
+
+				dv := dvList.Items[0]
+				templateSize := resource.MustParse("10Gi")
+				Expect(dv.Spec.Storage.Resources.Requests[k8sv1.ResourceStorage]).To(Equal(templateSize))
+			})
+		})
+	})
 })
 
 func NewVirtualMachine(name string) *v1.VirtualMachine {
@@ -282,4 +405,70 @@ func NewDataVolume(name string) *v1beta1.DataVolume {
 			Namespace: k8sv1.NamespaceDefault,
 		},
 	}
+}
+
+func NewVirtualMachineWithSnapshot(name, snapshotName string) *v1.VirtualMachine {
+	templateSize := resource.MustParse("10Gi")
+	return &v1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k8sv1.NamespaceDefault,
+		},
+		Spec: v1.VirtualMachineSpec{
+			Template: &v1.VirtualMachineInstanceTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{},
+				Spec: v1.VirtualMachineInstanceSpec{
+					Volumes: []v1.Volume{
+						{
+							Name: "rootdisk",
+							VolumeSource: v1.VolumeSource{
+								DataVolume: &v1.DataVolumeSource{
+									Name: "rootdisk",
+								},
+							},
+						},
+					},
+				},
+			},
+			DataVolumeTemplates: []v1.DataVolumeTemplateSpec{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "rootdisk",
+					},
+					Spec: v1beta1.DataVolumeSpec{
+						Source: &v1beta1.DataVolumeSource{
+							Snapshot: &v1beta1.DataVolumeSourceSnapshot{
+								Namespace: k8sv1.NamespaceDefault,
+								Name:      snapshotName,
+							},
+						},
+						Storage: &v1beta1.StorageSpec{
+							Resources: k8sv1.ResourceRequirements{
+								Requests: k8sv1.ResourceList{
+									k8sv1.ResourceStorage: templateSize,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func NewVolumeSnapshot(name string, restoreSize *resource.Quantity) *snapshotv1.VolumeSnapshot {
+	volumeSnapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k8sv1.NamespaceDefault,
+		},
+	}
+
+	if restoreSize != nil {
+		volumeSnapshot.Status = &snapshotv1.VolumeSnapshotStatus{
+			RestoreSize: restoreSize,
+		}
+	}
+
+	return volumeSnapshot
 }
